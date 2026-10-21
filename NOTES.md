@@ -27,3 +27,28 @@
 - Result: 23 tests pass, clippy clean.
 - Mutation check: swapped div_ceil for plain / (floor). 6 model tests failed, so the tests do catch it. The 3 that still passed were the exactly divisible ones, which makes sense since floor = ceil there.
 - SURPRISE from the mutation check: the crash was "attempt to subtract with overflow" in pages * P - r. Debug builds panic on overflow, RELEASE BUILDS WRAP SILENTLY. Phase 3 runs in release, so a bug like that would give a giant wrong number instead of a crash. Need to decide about overflow-checks in release.
+
+## Phase 2: predictions, before any sweep (2026-10-21)
+
+Continuous approximation (computed with a quick awk script over data/, not the sweep):
+- Assume pages ~ r/P (ignore rounding up), so bookkeeping ~ 64 * r / P per program, 64R/P total.
+- Assume the last page is randomly filled, so unused ~ P/2 per program, nP/2 total.
+- f(P) = 64R/P + nP/2. Small P: records blow up. Big P: waste grows. Set derivative to 0: 64R/P^2 = n/2, so P* = sqrt(128 * R / n) = sqrt(128 * mean request).
+- R = 34,392,541,729, n = 4,096, mean 8,396,616.63. P* = 32,783.64 bits.
+- Approx total at P*: 134,281,782 (mean per day 4,196,306).
+
+Exact scores at a few hand picked sizes (single evaluations, NOT the sweep):
+- P = 32,783: total 117,304,799, mean per day 3,665,774.97.
+- P = 32,784: total 118,355,423, mean per day 3,698,606.97.
+- The approximation came out 12% too high near P*.
+
+Data structure found while checking the approximation's assumptions:
+- Exactly 2,048 requests are below 32,784 bits, and 2,048 requests are exact multiples of 65,536 (2^16). The dataset is two populations, not one smooth spread.
+- That breaks the "unused ~ P/2" assumption. For the big half, unused space is exactly 0 for any P that divides 65,536, and very non random otherwise.
+- Adjacent sizes 32,783 and 32,784 already differ by over 1,000,000 bits, so the curve is not smooth.
+
+My prediction, verbatim (given AFTER seeing the continuous estimate and the data structure, so it is not independent of them):
+> then put my best size as 31256
+
+- Single exact evaluation of P = 31,256 (still not the sweep): total 136,693,391, mean per day 4,271,668.47. Bookkeeping 70,557,824, unused 66,135,567.
+- That is worse than P = 32,783 (117,304,799). Two reasons: 65,536 / 31,256 = 2.097, so a 65,536 bit program needs 3 pages instead of 2 and wastes 28,232 bits. Also 116 of the small programs are between 31,256 and 32,784 bits, so they spill into a second page.
