@@ -120,3 +120,11 @@ EXPLORATION ONLY, NOT THE ANSWER (results/exploration_per_day_best.csv):
 - 8 days would pick 65,536 (days 05, 06, 08, 10, 12, 20, 21, 26). These are the days with the most pages at 32,768, so lots of big programs: halving their record count beats the extra waste on the small programs.
 - 2 days (02 and 29) would pick 21,846. That's ceil(65,536 / 3): the smallest size where a 65,536 multiple fits in exactly 3 pages per 65,536. Waste is 2 bits per 65,536. Another "bottom of a ceiling drop" size, same principle as 32,768.
 - If every day could choose its own size: total 98,972,955 vs 101,545,439 shared. Only 2.5% better. The shared size is very close to the per day ideal.
+
+## Phase 5: deliverables (2026-10-21)
+
+- README.md written for whoever grades or runs this: answer up front (32,768 bits), run commands, output files, model, search method, bound argument in plain language, why 32,768, verification, error handling, and what is established vs only tested.
+- Audit before writing: no unwrap, expect or panic! anywhere outside tests. Only unwrap_or fallbacks (min/max of an empty dataset, core count).
+- Caught while proofreading the README: I first wrote that 65,536 bit pages make small programs waste "up to" half a page. Wrong direction. Small programs are at most 32,768 bits, so at 65,536 each one wastes AT LEAST half a page. Fixed.
+- Limits worth remembering for my reflection: the answer is exact for THIS data and THIS model only. It leans on the data being built so the biggest small request is exactly 32,768 and every big one is a multiple of 65,536. One small request of 32,769 bits could change everything. 10 of 32 days would pick something else on their own. Worst day objective never tested.
+- Things that surprised me over the whole project: the 64 bit record on every page dominates (about 2/3 of the penalty at the winner); the continuous formula got within 16 bits of the answer but still ranked 16th because the curve is a sawtooth; release vs debug was 13x; overflow checks cost 50%.
