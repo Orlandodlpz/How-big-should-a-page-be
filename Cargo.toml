@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+
+[profile.release]
+# Debug builds panic on integer overflow, release builds silently wrap by
+# default. Keep the check on so an arithmetic bug crashes instead of quietly
+# producing a wrong score.
+overflow-checks = true

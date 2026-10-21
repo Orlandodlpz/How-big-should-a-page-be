@@ -82,3 +82,46 @@ impl Error for LoadError {
         }
     }
 }
+
+/// Top level error for the binary. Loading is only one thing that can fail;
+/// writing results and bad command line arguments can too.
+#[derive(Debug)]
+pub enum AppError {
+    /// Anything from loading the workloads, kept intact as the source.
+    Load(LoadError),
+    /// Could not create or write an output file.
+    Write { path: PathBuf, source: io::Error },
+    /// Bad command line, with a message saying what was wrong.
+    Usage(String),
+}
+
+/// This impl is what lets `?` turn a LoadError into an AppError inside any
+/// function that returns Result<_, AppError>. Without it, every call site
+/// would need .map_err(AppError::Load).
+impl From<LoadError> for AppError {
+    fn from(e: LoadError) -> Self {
+        AppError::Load(e)
+    }
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppError::Load(e) => write!(f, "{e}"),
+            AppError::Write { path, source } => {
+                write!(f, "could not write {}: {source}", path.display())
+            }
+            AppError::Usage(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl Error for AppError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            AppError::Load(e) => Some(e),
+            AppError::Write { source, .. } => Some(source),
+            AppError::Usage(_) => None,
+        }
+    }
+}

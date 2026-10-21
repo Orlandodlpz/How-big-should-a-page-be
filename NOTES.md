@@ -52,3 +52,47 @@ My prediction, verbatim (given AFTER seeing the continuous estimate and the data
 
 - Single exact evaluation of P = 31,256 (still not the sweep): total 136,693,391, mean per day 4,271,668.47. Bookkeeping 70,557,824, unused 66,135,567.
 - That is worse than P = 32,783 (117,304,799). Two reasons: 65,536 / 31,256 = 2.097, so a 65,536 bit program needs 3 pages instead of 2 and wastes 28,232 bits. Also 116 of the small programs are between 31,256 and 32,784 bits, so they spill into a second page.
+
+## Phase 3: exhaustive sweep (2026-10-21)
+
+Setup decisions:
+- Threads: std::thread::scope + chunks_mut, one contiguous block of page sizes per core. Still std only, no rayon. Borrow checker proves threads write disjoint slices, no locks.
+- overflow-checks = true in [profile.release] so an arithmetic bug crashes instead of wrapping.
+- CSV: results/sweep.csv has every P from 1 to 131,072 (4 MB). results/sweep_tail.csv has the best P in each block of 4,096 after that (6,112 blocks). The program itself still scores all 25,165,824 sizes in memory (about 200 MB of u64).
+- New AppError enum (Load, Write, Usage) with From<LoadError>, so ? lifts load errors automatically.
+
+Runtime (Apple M4, 10 cores, 103,079,215,104 cost evaluations):
+- release, 10 threads, overflow checks ON: 17.4 s (rerun 17.5 s)
+- release, 10 threads, overflow checks OFF: 11.7 s. Checks cost about 50% here. Kept them on, same answer either way.
+- 1 thread, measured on P = 1..=100,000 and scaled up: release about 97 s, debug about 1,243 s (21 min). Debug is about 13x slower: no inlining of program_cost, iterator chains not fused, values not kept in registers.
+- 10 threads gave about 5.5x, not 10x. M4 is 4 performance + 6 efficiency cores.
+
+RESULT: best page size 32,768 bits (2^15). Unique, no ties.
+- Total 101,545,439 bits. Mean per day 3,173,294.96875 bits.
+- Top 10 is just 32,768 through 32,777, each one 1,050,624 worse than the last.
+- 32,767 (one bit less): 168,257,999. That's 66,712,560 worse, rank 35,140.
+- Powers of two: 16,384 -> 151,186,015 (rank 22,400). 65,536 -> 135,099,871 (rank 390). 1,024 -> 2,150,627,807.
+
+Why the curve is jagged (ceiling effect):
+- Exact identity: T(P) = (64 + P) * N(P) - R, where N(P) is total pages.
+- While N stays the same, every extra bit of P adds 1 unused bit to every page, so T rises by N per bit. At 32,768, N = 1,050,624, which is exactly the step in the top 10.
+- When P crosses a point where a program fits in one fewer page, N drops and T falls off a cliff. So the curve is a sawtooth: slow climbs, sudden drops. The winner has to sit at the bottom of a drop.
+- 32,767 vs 32,768: all 2,064 requests that are multiples of 32,768 need one extra page at 32,767. Change = 32,831 * 2,064 - 1,050,624 = 66,712,560. Matches the sweep exactly.
+
+Why 2^15 specifically:
+- Largest "small" request is exactly 32,768 (three of them). So at P = 32,768 every small program fits in one page.
+- Every big request is a multiple of 65,536, so at P = 32,768 the big programs waste 0 bits.
+- Go smaller (16,384): twice the records on the big programs. Go bigger (65,536): every small program wastes up to 65,536. 32,768 is the one size that gets both groups right.
+
+Comparison to predictions:
+- My prediction 31,256: rank 2,040, total 136,693,391, 34.6% worse than the best. 65,536 doesn't divide into it, so each 65,536 bit program needs 3 pages, and 116 small programs spill into a second page.
+- Continuous estimate 32,783.64: within 16 bits of the winner (0.05%), but 32,783 ranks 16th and is 15.5% worse. 15 bits too far right times about 1.05M per bit = 15.76M. Close in P is not close in score on a sawtooth. Its predicted best score (134.3M) was 32% too high because it assumed P/2 waste on every program, but at 2^15 half the programs waste nothing.
+
+Bound checks:
+- Locked bound covers through 25,165,824.
+- Tighter bound: (P + 64) * n - R is already above the best total for every P >= 8,421,345. So two thirds of the sweep provably couldn't win. Used only as a check.
+- Every swept total is at or above that floor (0 violations), a consistency check on the sweep itself.
+
+Small things:
+- My shell test loop passed "sweep --check 0" as ONE argument (zsh does not word split $var). Looked like a CLI bug, was a test harness bug.
+- Every mean ends in .96875 or similar fractions of 1/32 because the mean is total / 32, which is exact in 5 decimals.
