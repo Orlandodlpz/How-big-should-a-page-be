@@ -5,12 +5,14 @@ use std::thread;
 use std::time::Instant;
 
 use page_size::error::AppError;
-use page_size::report::{self, commas, mean_text};
+use page_size::model::total_cost;
+use page_size::naive::naive_group;
+use page_size::report::{self, DayBest, DayRow, commas, mean_text};
 use page_size::sweep::{self, total_at};
 use page_size::workload::{self, EXPECTED_PROGRAMS_PER_DAY, Workloads};
 
 const DEFAULT_DATA_DIR: &str = "data/workloads";
-const USAGE: &str = "usage: page_size [summary|sweep] [--data DIR] [--check P]...";
+const USAGE: &str = "usage: page_size [summary|sweep|report] [--data DIR] [--check P]...";
 
 /// Dense CSV covers every size up to here (2^17, four times the continuous
 /// estimate). Beyond it, sweep_tail.csv keeps the best size per block.
@@ -36,6 +38,7 @@ fn main() -> ExitCode {
 enum Command {
     Summary,
     Sweep,
+    Report,
 }
 
 struct Args {
@@ -56,6 +59,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, AppError> 
         match arg.as_str() {
             "summary" if first => parsed.command = Command::Summary,
             "sweep" if first => parsed.command = Command::Sweep,
+            "report" if first => parsed.command = Command::Report,
             "--data" => {
                 let dir = args
                     .next()
@@ -95,6 +99,7 @@ fn run() -> Result<(), AppError> {
             Ok(())
         }
         Command::Sweep => run_sweep(&loaded, &args.checks),
+        Command::Report => run_report(&loaded),
     }
 }
 
@@ -135,19 +140,38 @@ fn summary(dir: &Path, loaded: &Workloads) {
     }
 }
 
-fn run_sweep(loaded: &Workloads, checks: &[NonZeroU64]) -> Result<(), AppError> {
-    let requests: Vec<u64> = loaded.all_requests().collect();
-    let days = loaded.days.len();
-    let n = requests.len() as u64;
-    let total_requested: u64 = requests.iter().sum();
-    let max_request = requests
+/// Everything the sweep and report commands need from one full sweep.
+struct FullSweep {
+    requests: Vec<u64>,
+    totals: Vec<u64>,
+    best: u64,
+    winners: Vec<u64>,
+    max_request: NonZeroU64,
+    threads: NonZeroUsize,
+}
+
+/// If the OS cannot tell us the core count, one thread is still correct.
+fn thread_count() -> NonZeroUsize {
+    thread::available_parallelism().unwrap_or(NonZeroUsize::MIN)
+}
+
+/// Largest request as a NonZeroU64, or a Usage error if there are none.
+fn max_request_of(requests: &[u64]) -> Result<NonZeroU64, AppError> {
+    requests
         .iter()
         .copied()
         .max()
         .and_then(NonZeroU64::new)
-        .ok_or_else(|| AppError::Usage("no programs loaded, nothing to sweep".into()))?;
-    // If the OS cannot tell us the core count, one thread is still correct.
-    let threads = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
+        .ok_or_else(|| AppError::Usage("no programs loaded, nothing to sweep".into()))
+}
+
+fn full_sweep(loaded: &Workloads) -> Result<FullSweep, AppError> {
+    let requests: Vec<u64> = loaded.all_requests().collect();
+    let days = loaded.days.len();
+    let n = requests.len() as u64;
+    let total_requested: u64 = requests.iter().sum();
+    let max_request = max_request_of(&requests)?;
+    let threads = thread_count();
 
     println!(
         "{} programs over {days} days, {} bits requested",
@@ -170,6 +194,29 @@ fn run_sweep(loaded: &Workloads, checks: &[NonZeroU64]) -> Result<(), AppError> 
     let Some((best, winners)) = sweep::winners(&totals) else {
         return Err(AppError::Usage("sweep produced no results".into()));
     };
+    Ok(FullSweep {
+        requests,
+        totals,
+        best,
+        winners,
+        max_request,
+        threads,
+    })
+}
+
+fn run_sweep(loaded: &Workloads, checks: &[NonZeroU64]) -> Result<(), AppError> {
+    let FullSweep {
+        requests,
+        totals,
+        best,
+        winners,
+        max_request,
+        ..
+    } = full_sweep(loaded)?;
+    let days = loaded.days.len();
+    let n = requests.len() as u64;
+    let total_requested: u64 = requests.iter().sum();
+
     let row = |p: u64, t: u64| {
         let gap = t - best;
         let rank = sweep::rank_of(&totals, p).map_or("?".into(), |r| commas(r as u64));
@@ -270,5 +317,237 @@ fn run_sweep(loaded: &Workloads, checks: &[NonZeroU64]) -> Result<(), AppError> 
         tail.display(),
         blocks.len()
     );
+    Ok(())
+}
+
+/// Page sizes the naive implementation re-scores besides the winner(s): small,
+/// odd, prime, the student prediction, both sides of the winner, the
+/// continuous estimate, powers of two, and the largest request. P = 1 is left
+/// out on purpose: the naive loop would take one step per requested bit
+/// (34 billion steps). Unit tests cover P = 1.
+const NAIVE_CHECK_SIZES: [u64; 14] = [
+    64, 1000, 1024, 4096, 7919, 16_384, 31_256, 32_767, 32_769, 32_783, 32_784, 65_536, 100_003,
+    1_048_576,
+];
+
+fn run_report(loaded: &Workloads) -> Result<(), AppError> {
+    let FullSweep {
+        totals,
+        best,
+        winners,
+        max_request,
+        threads,
+        ..
+    } = full_sweep(loaded)?;
+    let days = loaded.days.len();
+    let names: Vec<String> = winners.iter().map(|&w| commas(w)).collect();
+    println!(
+        "BEST page size: {} bits (total {}, mean per day {})",
+        names.join(", "),
+        commas(best),
+        mean_text(best, days)
+    );
+
+    // 1. Per day table at the winner.
+    for (k, &w) in winners.iter().enumerate() {
+        let Some(p) = NonZeroU64::new(w) else {
+            continue;
+        };
+        let rows: Vec<DayRow> = loaded
+            .days
+            .iter()
+            .map(|d| DayRow {
+                day: d.number,
+                programs: d.requests.len(),
+                cost: total_cost(&d.requests, p),
+            })
+            .collect();
+        println!("\nPer day at P = {} bits", commas(w));
+        println!(
+            "  {:>5}  {:>8}  {:>9}  {:>14}  {:>14}  {:>14}",
+            "day", "programs", "pages", "bookkeeping", "unused", "penalty"
+        );
+        for r in &rows {
+            println!(
+                "  {:>5}  {:>8}  {:>9}  {:>14}  {:>14}  {:>14}",
+                format!("{:02}", r.day),
+                r.programs,
+                commas(r.cost.pages),
+                commas(r.cost.bookkeeping_bits),
+                commas(r.cost.unused_bits),
+                commas(r.cost.penalty)
+            );
+        }
+        let sum: page_size::model::Cost = rows.iter().map(|r| r.cost).sum();
+        let programs: usize = rows.iter().map(|r| r.programs).sum();
+        println!(
+            "  {:>5}  {:>8}  {:>9}  {:>14}  {:>14}  {:>14}",
+            "TOTAL",
+            programs,
+            commas(sum.pages),
+            commas(sum.bookkeeping_bits),
+            commas(sum.unused_bits),
+            commas(sum.penalty)
+        );
+        println!(
+            "  per day penalties sum to {}, sweep total is {}: {}",
+            commas(sum.penalty),
+            commas(best),
+            if sum.penalty == best {
+                "MATCH"
+            } else {
+                "MISMATCH"
+            }
+        );
+        if sum.penalty != best {
+            return Err(AppError::Verify(format!(
+                "per day sum {} != sweep total {best} at P = {w}",
+                sum.penalty
+            )));
+        }
+        // One file per winner; with a unique winner that is just per_day.csv.
+        let path = if k == 0 {
+            PathBuf::from("results/per_day.csv")
+        } else {
+            PathBuf::from(format!("results/per_day_{w}.csv"))
+        };
+        report::write_per_day_csv(&path, &rows)?;
+        println!("  wrote {}", path.display());
+    }
+
+    // 2. Independent check with the naive page-at-a-time implementation.
+    let mut sizes: Vec<u64> = winners.clone();
+    sizes.extend(NAIVE_CHECK_SIZES);
+    sizes.push(max_request.get());
+    sizes.sort_unstable();
+    sizes.dedup();
+    println!("\nIndependent check: naive page-at-a-time loop vs fast ceiling math");
+    println!(
+        "  {:>12}  {:>16}  {:>16}  {:>11}  {:>8}",
+        "page bits", "naive total", "sweep total", "days agree", "result"
+    );
+    let start = Instant::now();
+    let mut failures = Vec::new();
+    for &size in &sizes {
+        let Some(p) = NonZeroU64::new(size) else {
+            continue;
+        };
+        let mut naive_total = 0;
+        let mut days_agree = 0;
+        for d in &loaded.days {
+            let naive = naive_group(&d.requests, p);
+            let fast = total_cost(&d.requests, p);
+            // Compare every component, not just the penalty, so two errors
+            // cannot cancel out.
+            if (
+                naive.pages,
+                naive.bookkeeping_bits,
+                naive.unused_bits,
+                naive.penalty(),
+            ) == (
+                fast.pages,
+                fast.bookkeeping_bits,
+                fast.unused_bits,
+                fast.penalty,
+            ) {
+                days_agree += 1;
+            }
+            naive_total += naive.penalty();
+        }
+        let swept = total_at(&totals, size);
+        let ok = days_agree == days && swept == Some(naive_total);
+        println!(
+            "  {:>12}  {:>16}  {:>16}  {:>11}  {:>8}",
+            commas(size),
+            commas(naive_total),
+            swept.map_or("n/a".into(), commas),
+            format!("{days_agree}/{days}"),
+            if ok { "AGREE" } else { "DIFFER" }
+        );
+        if !ok {
+            failures.push(size);
+        }
+    }
+    println!(
+        "  {} sizes checked in {:.2} s, {} disagreements",
+        sizes.len(),
+        start.elapsed().as_secs_f64(),
+        failures.len()
+    );
+    if !failures.is_empty() {
+        return Err(AppError::Verify(format!(
+            "naive and fast implementations differ at P = {failures:?}"
+        )));
+    }
+
+    // 3. Exploration: each day's own best size.
+    let Some(overall) = winners.first().copied().and_then(NonZeroU64::new) else {
+        return Ok(());
+    };
+    println!("\n==================== EXPLORATION ONLY, NOT THE ANSWER ====================");
+    println!("The machine uses ONE page size for every day. This shows what each day");
+    println!("would pick on its own, to see how much the shared size costs.");
+    println!(
+        "  {:>5}  {:>22}  {:>14}  {:>14}  {:>12}",
+        "day",
+        "own best P (bits)",
+        "own best",
+        format!("at {}", commas(overall.get())),
+        "extra"
+    );
+    let start = Instant::now();
+    let mut explore = Vec::new();
+    for d in &loaded.days {
+        let day_max = max_request_of(&d.requests)?;
+        let day_totals = sweep::sweep(&d.requests, day_max, threads);
+        let Some((day_best, day_winners)) = sweep::winners(&day_totals) else {
+            continue;
+        };
+        let at_overall = total_cost(&d.requests, overall).penalty;
+        let shown: Vec<String> = day_winners.iter().take(3).map(|&w| commas(w)).collect();
+        let more = if day_winners.len() > 3 {
+            format!(" +{}", day_winners.len() - 3)
+        } else {
+            String::new()
+        };
+        println!(
+            "  {:>5}  {:>22}  {:>14}  {:>14}  {:>12}",
+            format!("{:02}", d.number),
+            format!("{}{more}", shown.join(" ")),
+            commas(day_best),
+            commas(at_overall),
+            commas(at_overall - day_best)
+        );
+        explore.push(DayBest {
+            day: d.number,
+            best_sizes: day_winners,
+            best_total: day_best,
+            at_overall_winner: at_overall,
+        });
+    }
+    let own: u64 = explore.iter().map(|e| e.best_total).sum();
+    let shared: u64 = explore.iter().map(|e| e.at_overall_winner).sum();
+    let same = explore
+        .iter()
+        .filter(|e| e.best_sizes.contains(&overall.get()))
+        .count();
+    println!(
+        "  {same}/{} days have {} among their own best sizes",
+        explore.len(),
+        commas(overall.get())
+    );
+    println!(
+        "  if every day chose its own size: total {} (mean {}), vs {} with one shared size",
+        commas(own),
+        mean_text(own, days),
+        commas(shared)
+    );
+    println!(
+        "  per day sweeps took {:.2} s",
+        start.elapsed().as_secs_f64()
+    );
+    let path = Path::new("results/exploration_per_day_best.csv");
+    report::write_exploration_csv(path, &explore)?;
+    println!("  wrote {} (EXPLORATION ONLY)", path.display());
     Ok(())
 }

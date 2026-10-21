@@ -3,7 +3,9 @@
 //! All integer math, all in bits. No floats: integer div_ceil is exact by
 //! construction, so there is no rounding argument to make.
 
+use std::iter::Sum;
 use std::num::NonZeroU64;
+use std::ops::Add;
 
 /// Each allocated page needs one bookkeeping record of this many bits.
 pub const RECORD_BITS: u64 = 64;
@@ -40,6 +42,37 @@ pub fn program_cost(request: u64, page_size: NonZeroU64) -> Cost {
         unused_bits,
         penalty: bookkeeping_bits + unused_bits,
     }
+}
+
+impl Add for Cost {
+    type Output = Cost;
+
+    fn add(self, other: Cost) -> Cost {
+        Cost {
+            pages: self.pages + other.pages,
+            bookkeeping_bits: self.bookkeeping_bits + other.bookkeeping_bits,
+            unused_bits: self.unused_bits + other.unused_bits,
+            penalty: self.penalty + other.penalty,
+        }
+    }
+}
+
+/// Lets `.sum()` add up Costs field by field, starting from all zeros.
+impl Sum for Cost {
+    fn sum<I: Iterator<Item = Cost>>(iter: I) -> Cost {
+        let zero = Cost {
+            pages: 0,
+            bookkeeping_bits: 0,
+            unused_bits: 0,
+            penalty: 0,
+        };
+        iter.fold(zero, Add::add)
+    }
+}
+
+/// Field by field total over a group of programs, e.g. one day.
+pub fn total_cost(requests: &[u64], page_size: NonZeroU64) -> Cost {
+    requests.iter().map(|&r| program_cost(r, page_size)).sum()
 }
 
 #[cfg(test)]
@@ -137,6 +170,14 @@ mod tests {
             program_cost(25_165_824, p(1_048_576)),
             cost(24, 1536, 0, 1536)
         );
+    }
+
+    #[test]
+    fn total_cost_adds_field_by_field() {
+        // P = 10: r=23 -> (3, 192, 7, 199), r=30 -> (3, 192, 0, 192),
+        // r=11 -> (2, 128, 9, 137). Sum: (8, 512, 16, 528).
+        assert_eq!(total_cost(&[23, 30, 11], p(10)), cost(8, 512, 16, 528));
+        assert_eq!(total_cost(&[], p(10)), cost(0, 0, 0, 0));
     }
 
     #[test]

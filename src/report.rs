@@ -5,6 +5,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use crate::error::AppError;
+use crate::model::Cost;
 use crate::sweep::page_size_at;
 
 /// Mean daily score as text. With 32 days the division is exact in 5
@@ -94,6 +95,65 @@ pub fn write_tail_csv(
                     out,
                     "{first},{last},{best_p},{best_t},{}",
                     mean_text(best_t, days)
+                )?;
+            }
+            Ok(())
+        },
+    )
+}
+
+/// One day's line in the per day table at the chosen page size.
+pub struct DayRow {
+    pub day: u32,
+    pub programs: usize,
+    pub cost: Cost,
+}
+
+pub fn write_per_day_csv(path: &Path, rows: &[DayRow]) -> Result<(), AppError> {
+    write_csv(
+        path,
+        "day,programs,pages,bookkeeping_bits,unused_bits,total_penalty_bits",
+        |out| {
+            for r in rows {
+                writeln!(
+                    out,
+                    "{},{},{},{},{},{}",
+                    r.day,
+                    r.programs,
+                    r.cost.pages,
+                    r.cost.bookkeeping_bits,
+                    r.cost.unused_bits,
+                    r.cost.penalty
+                )?;
+            }
+            Ok(())
+        },
+    )
+}
+
+/// EXPLORATION ONLY: the best page size if this one day could choose alone.
+pub struct DayBest {
+    pub day: u32,
+    pub best_sizes: Vec<u64>,
+    pub best_total: u64,
+    pub at_overall_winner: u64,
+}
+
+pub fn write_exploration_csv(path: &Path, rows: &[DayBest]) -> Result<(), AppError> {
+    write_csv(
+        path,
+        "day,best_page_sizes_bits,best_day_penalty_bits,day_penalty_at_overall_winner_bits,extra_bits_from_shared_size",
+        |out| {
+            for r in rows {
+                let sizes: Vec<String> = r.best_sizes.iter().map(u64::to_string).collect();
+                writeln!(
+                    out,
+                    "{},{},{},{},{}",
+                    r.day,
+                    sizes.join(" "),
+                    r.best_total,
+                    r.at_overall_winner,
+                    r.at_overall_winner - r.best_total
                 )?;
             }
             Ok(())

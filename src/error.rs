@@ -93,6 +93,9 @@ pub enum AppError {
     Write { path: PathBuf, source: io::Error },
     /// Bad command line, with a message saying what was wrong.
     Usage(String),
+    /// A cross check failed (two implementations disagree, or per day totals
+    /// do not add up). The run must not look successful.
+    Verify(String),
 }
 
 /// This impl is what lets `?` turn a LoadError into an AppError inside any
@@ -112,6 +115,7 @@ impl fmt::Display for AppError {
                 write!(f, "could not write {}: {source}", path.display())
             }
             AppError::Usage(msg) => write!(f, "{msg}"),
+            AppError::Verify(msg) => write!(f, "verification failed: {msg}"),
         }
     }
 }
@@ -121,7 +125,7 @@ impl Error for AppError {
         match self {
             AppError::Load(e) => Some(e),
             AppError::Write { source, .. } => Some(source),
-            AppError::Usage(_) => None,
+            AppError::Usage(_) | AppError::Verify(_) => None,
         }
     }
 }

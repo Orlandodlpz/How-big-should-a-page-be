@@ -96,3 +96,27 @@ Bound checks:
 Small things:
 - My shell test loop passed "sweep --check 0" as ONE argument (zsh does not word split $var). Looked like a CLI bug, was a test harness bug.
 - Every mean ends in .96875 or similar fractions of 1/32 because the mean is total / 32, which is exact in 5 decimals.
+
+## Phase 4: report and independent verification (2026-10-21)
+
+New command: `cargo run --release -- report` (about 38 s total: sweep 17.7 s, naive check 0.24 s, per day sweeps 19.9 s).
+
+Per day table at P = 32,768 (results/per_day.csv):
+- Totals: 4,096 programs, 1,050,624 pages, 67,239,936 bookkeeping bits, 34,305,503 unused bits, 101,545,439 penalty.
+- Per day penalties sum to 101,545,439 = sweep total. MATCH.
+- Bookkeeping is about 2/3 of the penalty, unused about 1/3. Not 50/50 like the continuous model's optimum would say (there, 64R/P = nP/2 at P*).
+- Days swing a lot: 2,602,734 (day 32) to 3,670,653 (day 10). Days with more pages (more big programs) have more bookkeeping and less waste.
+
+Naive implementation (src/naive.rs):
+- Hands out pages one at a time until the request fits. No division, no ceiling, no multiplication, no shared code with model.rs.
+- Checked 16 sizes: the winner, both neighbours, 31,256 (my prediction), 32,783 and 32,784 (continuous estimate), powers of two, a prime (7,919), 64, 1,000, 100,003, 2^20, and the max request 25,165,824.
+- Compared per day AND per component (pages, bookkeeping, unused, penalty), not just the final penalty, so two bugs can't cancel out. 32/32 days agree at every size, and the naive overall total equals the threaded sweep total every time. 0 disagreements.
+- Skipped P = 1 on purpose: the naive loop takes one step per page, so P = 1 means one step per requested bit, 34 billion steps. Unit tests cover P = 1.
+- Bonus third implementation: the awk one liner from Phase 2 (different language, different file reader) gave 117,304,799 at 32,783, 118,355,423 at 32,784 and 136,693,391 at 31,256. The Rust sweep gives exactly the same. So even the loader is cross checked, not just the math.
+- Verification failures now return AppError::Verify, so a mismatch exits non zero instead of just printing "MISMATCH".
+
+EXPLORATION ONLY, NOT THE ANSWER (results/exploration_per_day_best.csv):
+- 22 of 32 days would pick 32,768 on their own.
+- 8 days would pick 65,536 (days 05, 06, 08, 10, 12, 20, 21, 26). These are the days with the most pages at 32,768, so lots of big programs: halving their record count beats the extra waste on the small programs.
+- 2 days (02 and 29) would pick 21,846. That's ceil(65,536 / 3): the smallest size where a 65,536 multiple fits in exactly 3 pages per 65,536. Waste is 2 bits per 65,536. Another "bottom of a ceiling drop" size, same principle as 32,768.
+- If every day could choose its own size: total 98,972,955 vs 101,545,439 shared. Only 2.5% better. The shared size is very close to the per day ideal.

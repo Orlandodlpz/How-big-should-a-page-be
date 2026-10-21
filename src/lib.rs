@@ -3,6 +3,7 @@
 
 pub mod error;
 pub mod model;
+pub mod naive;
 pub mod report;
 pub mod sweep;
 pub mod workload;
