@@ -130,3 +130,208 @@ pub fn load_workloads(dir: &Path) -> Result<Workloads, LoadError> {
 
     Ok(Workloads { days, warnings })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+    use std::path::PathBuf;
+
+    // LoadError cannot derive PartialEq (io::Error does not implement it), so
+    // these tests check variants with matches! instead of assert_eq!.
+
+    fn fake() -> &'static Path {
+        Path::new("day_99/loads")
+    }
+
+    #[test]
+    fn parses_valid_lines_and_keeps_duplicates() {
+        let got = parse_loads(fake(), "5\n6\n6\n7\n");
+        assert_eq!(got.ok(), Some(vec![5, 6, 6, 7]));
+    }
+
+    #[test]
+    fn missing_final_newline_and_crlf_are_fine() {
+        assert_eq!(parse_loads(fake(), "5\n6").ok(), Some(vec![5, 6]));
+        assert_eq!(parse_loads(fake(), "5\r\n6\r\n").ok(), Some(vec![5, 6]));
+    }
+
+    #[test]
+    fn empty_file_is_ok_but_empty() {
+        // Not an error at this level. load_workloads warns about the count.
+        assert_eq!(parse_loads(fake(), "").ok(), Some(vec![]));
+    }
+
+    #[test]
+    fn blank_line_is_empty_line_error_with_line_number() {
+        let err = parse_loads(fake(), "5\n\n7\n").unwrap_err();
+        assert!(
+            matches!(err, LoadError::EmptyLine { line: 2, .. }),
+            "{err:?}"
+        );
+        // Whitespace only counts as blank too.
+        let err = parse_loads(fake(), "5\n   \n").unwrap_err();
+        assert!(
+            matches!(err, LoadError::EmptyLine { line: 2, .. }),
+            "{err:?}"
+        );
+        // An extra blank line at the end of the file is still a blank line.
+        let err = parse_loads(fake(), "5\n6\n\n").unwrap_err();
+        assert!(
+            matches!(err, LoadError::EmptyLine { line: 3, .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn non_integers_are_not_an_integer_errors() {
+        for (input, bad) in [("5\n12.5\n", "12.5"), ("abc\n", "abc"), ("1e6\n", "1e6")] {
+            let err = parse_loads(fake(), input).unwrap_err();
+            assert!(
+                matches!(&err, LoadError::NotAnInteger { text, .. } if text == bad),
+                "{err:?}"
+            );
+        }
+        // Too big for 64 bits also lands here.
+        let err = parse_loads(fake(), "99999999999999999999\n").unwrap_err();
+        assert!(
+            matches!(err, LoadError::NotAnInteger { line: 1, .. }),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn zero_and_negative_are_not_positive_errors() {
+        let err = parse_loads(fake(), "0\n").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LoadError::NotPositive {
+                    line: 1,
+                    value: 0,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        let err = parse_loads(fake(), "5\n-3\n").unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LoadError::NotPositive {
+                    line: 2,
+                    value: -3,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn errors_carry_the_path_and_display_it() {
+        let err = parse_loads(fake(), "5\nabc\n").unwrap_err();
+        assert!(matches!(&err, LoadError::NotAnInteger { path, .. } if path == fake()));
+        assert_eq!(
+            err.to_string(),
+            "day_99/loads:2: \"abc\" is not a whole number of bits"
+        );
+    }
+
+    #[test]
+    fn missing_file_is_missing_file_error() {
+        let path = Path::new("definitely/not/here/loads");
+        let err = load_day_file(path).unwrap_err();
+        assert!(
+            matches!(&err, LoadError::MissingFile { path: p } if p == path),
+            "{err:?}"
+        );
+    }
+
+    /// A scratch directory under the system temp folder, deleted on drop.
+    /// The name includes the process id and test name so parallel tests
+    /// never share a folder.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(name: &str) -> Result<Self, Box<dyn Error>> {
+            let dir =
+                std::env::temp_dir().join(format!("page_size_test_{}_{name}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir)?;
+            Ok(Scratch(dir))
+        }
+
+        fn day(&self, number: u32, contents: Option<&str>) -> Result<(), Box<dyn Error>> {
+            let day = self.0.join(format!("day_{number:02}"));
+            fs::create_dir_all(&day)?;
+            if let Some(text) = contents {
+                fs::write(day.join("loads"), text)?;
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn missing_directory_is_missing_file_error() {
+        let err = load_workloads(Path::new("no/such/workloads")).unwrap_err();
+        assert!(matches!(err, LoadError::MissingFile { .. }), "{err:?}");
+    }
+
+    #[test]
+    fn directory_without_days_is_no_days_error() -> Result<(), Box<dyn Error>> {
+        let s = Scratch::new("no_days")?;
+        fs::write(s.0.join(".DS_Store"), "junk")?;
+        let err = load_workloads(&s.0).unwrap_err();
+        assert!(matches!(err, LoadError::NoDays { .. }), "{err:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn day_folder_without_loads_is_missing_file_error() -> Result<(), Box<dyn Error>> {
+        let s = Scratch::new("no_loads")?;
+        s.day(1, Some("5\n"))?;
+        s.day(2, None)?;
+        let err = load_workloads(&s.0).unwrap_err();
+        assert!(
+            matches!(&err, LoadError::MissingFile { path } if path.ends_with("day_02/loads")),
+            "{err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lowest_bad_day_is_reported_first() -> Result<(), Box<dyn Error>> {
+        // Regression test for the Phase 0 read_dir ordering bug.
+        let s = Scratch::new("ordering")?;
+        for n in [3, 1, 2] {
+            s.day(n, Some("5\nbad\n"))?;
+        }
+        let err = load_workloads(&s.0).unwrap_err();
+        assert!(
+            matches!(&err, LoadError::NotAnInteger { path, line: 2, .. } if path.ends_with("day_01/loads")),
+            "{err:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn wrong_counts_warn_but_still_load() -> Result<(), Box<dyn Error>> {
+        let s = Scratch::new("counts")?;
+        s.day(2, Some("7\n8\n"))?;
+        s.day(1, Some("5\n"))?;
+        let w = load_workloads(&s.0)?;
+        // Sorted by day number regardless of creation order.
+        let numbers: Vec<u32> = w.days.iter().map(|d| d.number).collect();
+        assert_eq!(numbers, vec![1, 2]);
+        assert_eq!(w.warnings.len(), 3, "{:?}", w.warnings); // 1 day count + 2 program counts
+        assert!(w.warnings[0].contains("expected 32 day folders, found 2"));
+        Ok(())
+    }
+}

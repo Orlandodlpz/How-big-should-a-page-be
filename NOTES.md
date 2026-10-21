@@ -13,3 +13,17 @@
 - Error enum LoadError: MissingFile, Io, NoDays, EmptyLine, NotAnInteger, NotPositive. Checked each by hand with scratch files, all report path:line. Parse as i64 first so "-3" becomes NotPositive instead of NotAnInteger.
 - Known limit: a 20 digit number gets NotAnInteger ("not a whole number of bits"), which is technically true for 64 bit integers but the message doesn't say "too big".
 - Gotcha for Phase 3: a full sweep.csv would be 25M rows, about 1 GB, past Excel's row limit.
+
+## Phase 1: cost function and tests (2026-10-21)
+
+- program_cost(request, page_size) in src/model.rs returns a Cost struct (pages, bookkeeping_bits, unused_bits, penalty). Struct not tuple: all four are u64, a tuple would let me swap two fields with no compile error.
+- page_size is NonZeroU64, not u64. P = 0 would divide by zero. Type makes it impossible, no runtime check in the hot loop, no Result for something that's a code bug not a data problem.
+- Ceiling with u64::div_ceil, not (r + P - 1) / P (can overflow near u64::MAX) and not f64 ceil (floats are the wrong tool for exact integer answers).
+- All hand checked cases from the prompt passed first try: r=23 P=10 -> 199, P=6 -> 257, P=15 -> 135.
+- Extra cases I added: one bit past a page boundary (r=11, P=10 costs 137 vs 64 for r=10, so one extra bit costs 73), and the dataset max 25,165,824 = 24 * 2^20, so P = 2^20 gives exactly 24 pages, 0 unused.
+- Invariant test over every r, P in 1..=300 that checks "ceiling" by its definition (pages * P >= r and (pages - 1) * P < r) without calling div_ceil.
+- Error tests: blank line (middle, whitespace only, extra at end), 12.5 / abc / 1e6 / 20 digit number, 0, -3, missing loads file, missing directory, folder with no days, wrong counts warn, lowest bad day reported first (regression test for the Phase 0 bug).
+- Real data integration test pins the Phase 0 numbers so a bad re-extract gets caught.
+- Result: 23 tests pass, clippy clean.
+- Mutation check: swapped div_ceil for plain / (floor). 6 model tests failed, so the tests do catch it. The 3 that still passed were the exactly divisible ones, which makes sense since floor = ceil there.
+- SURPRISE from the mutation check: the crash was "attempt to subtract with overflow" in pages * P - r. Debug builds panic on overflow, RELEASE BUILDS WRAP SILENTLY. Phase 3 runs in release, so a bug like that would give a giant wrong number instead of a crash. Need to decide about overflow-checks in release.
